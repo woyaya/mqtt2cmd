@@ -1,0 +1,266 @@
+# MQTT Subscriber Configuration Example
+# This file demonstrates all available configuration options
+
+global:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_level: INFO
+  
+  # Log file path (relative or absolute)
+  log_file: logs/mqtt_subscriber.log
+  
+  # Number of days to keep old log files
+  log_retention_days: 7
+  
+  # Path to password file (optional)
+  # Passwords can be referenced using ${YAML:password_key}
+  password_file: passwords.yaml
+  
+  # Maximum reconnection delay in seconds (default: 60)
+  # When connection fails, retry with exponential backoff: 1, 2, 4, 8, 16, 32...
+  # The delay is capped at this maximum value
+  max_reconnect_delay: 60
+  
+  # Global defaults (optional) - can be overridden by server/handler config
+  # Default username for MQTT connections
+  # username: default_user
+  
+  # Default password for MQTT connections
+  # password: ${YAML:default_password}
+  
+  # Default client ID prefix
+  # client_id: mqtt_subscriber
+  
+  # Default keepalive interval in seconds
+  # keepalive: 60
+  
+  # Default TLS usage: true or false
+  # use_tls: false
+  
+  # Default command execution mode: sequential or parallel
+  # execution_mode: sequential
+  
+  # Default error handling: true (continue on error) or false (stop on error)
+  # ignore_errors: false
+  
+  # Default user to run commands as (requires root privileges)
+  # IMPORTANT: Only works when running the application as root
+  # If not root and this is set to a different user, the application will exit with an error
+  # run_as_user: appuser
+  
+  # Default working directory for command execution
+  # working_dir: /path/to/directory
+  
+  # Default environment variables for command execution
+  # env_vars:
+  #   VAR1: value1
+  #   VAR2: value2
+  
+  # Custom YAML variables (can be referenced using ${YAML:key} or ${key})
+  variables:
+    app_name: my-application
+    deploy_user: deployer
+
+mqtt_servers:
+  # Server name (can be any identifier)
+  localhost:
+    # MQTT broker hostname or IP (required)
+    host: 127.0.0.1
+    
+    # MQTT broker port (required)
+    port: 1883
+    
+    # Username for authentication (required)
+    username: test
+    
+    # Password - can use variable reference
+    # Syntax: ${YAML:key} or ${key} for YAML variables
+    #         ${ENV:VAR} for environment variables
+    password: ${localhost_password}
+    
+    # Client ID for MQTT connection (optional)
+    # If not specified, uses global default or auto-generated
+    client_id: mqtt_subscriber_local
+    
+    # Keepalive interval in seconds (optional, default: 60)
+    keepalive: 60
+    
+    # Use TLS encryption: true or false (optional, default: false)
+    use_tls: false
+    
+    # Maximum reconnection delay in seconds (optional, default: 60)
+    # Overrides global setting if specified
+    # max_reconnect_delay: 60
+    
+    # Server-level defaults (optional) - override global defaults
+    # execution_mode: sequential
+    # ignore_errors: false
+    # working_dir: /opt/app
+    # env_vars:
+    #   SERVER_ENV: production
+    
+    subscriptions:
+      # Topic to subscribe to
+      test/command/string:
+        # QoS level: 0 (at most once), 1 (at least once), 2 (exactly once)
+        qos: 1
+        
+        handlers:
+          # Payload type: string or json
+          - payload_type: string
+            
+            # Expected payload content
+            # For string: exact match or regex pattern
+            # For json: structure to match
+            payload: "execute_test"
+            
+            # Commands to execute (required)
+            # Variable syntax:
+            #   ${PAYLOAD:var}        - from payload
+            #   ${PAYLOAD:PAYLOAD}    - entire payload
+            #   ${ENV:VAR}            - from environment
+            #   ${YAML:var} or ${var} - from YAML config
+            #   ${var:-default}       - with default value
+            commands:
+              - 'echo "Test command 1 executed"'
+              - 'echo "Test command 2 executed"'
+              - 'echo "Payload was: ${PAYLOAD:PAYLOAD}"'
+            
+            # Execution mode: sequential or parallel (optional)
+            # sequential: run commands one by one
+            # parallel: run all commands simultaneously
+            execution_mode: sequential
+            
+            # Ignore errors: true or false (optional)
+            # true: continue executing remaining commands if one fails
+            # false: stop execution on first failure
+            ignore_errors: false
+            
+            # Working directory for command execution (optional)
+            # Commands will be executed in this directory
+            # working_dir: /opt/app
+            
+            # Environment variables for command execution (optional)
+            # These are added to the command's environment
+            # env_vars:
+            #   APP_ENV: production
+            #   LOG_LEVEL: info
+      
+      # Example: JSON payload with variable substitution
+      test/command/json:
+        qos: 2
+        handlers:
+          - payload_type: json
+            payload:
+              action: deploy
+            commands:
+              # Access JSON fields using dot notation
+              - 'echo "Deploying ${PAYLOAD:app_name} version ${PAYLOAD:version}"'
+              - 'echo "Environment: ${PAYLOAD:environment}"'
+              # Use YAML variables
+              - 'echo "Deployed by: ${YAML:deploy_user}"'
+              # Use environment variables with default
+              - 'echo "Home: ${ENV:HOME:-/root}"'
+            execution_mode: parallel
+            ignore_errors: false
+      
+      # Example: Multiple handlers for same topic
+      test/command/multi:
+        qos: 0
+        handlers:
+          - payload_type: string
+            payload: "start_service"
+            commands:
+              - 'echo "Starting service..."'
+              - 'systemctl start myservice'
+            execution_mode: sequential
+            ignore_errors: false
+          
+          - payload_type: string
+            payload: "stop_service"
+            commands:
+              - 'echo "Stopping service..."'
+              - 'systemctl stop myservice'
+            execution_mode: sequential
+            ignore_errors: false
+      
+      # Example: Error handling with ignore_errors=true
+      test/command/error:
+        qos: 1
+        handlers:
+          - payload_type: string
+            payload: "test_error_handling"
+            commands:
+              - 'echo "Command 1 - will succeed"'
+              - 'false'  # This will fail
+              - 'echo "Command 3 - will execute because ignore_errors=true"'
+            execution_mode: sequential
+            ignore_errors: true
+      
+      # Example: Run commands as specific user (requires root)
+      test/command/run_as_user:
+        qos: 1
+        handlers:
+          - payload_type: string
+            payload: "deploy_as_appuser"
+            commands:
+              - 'whoami'  # Will show 'appuser'
+              - 'echo "Deploying application..."'
+              - '/opt/myapp/deploy.sh'
+            run_as_user: appuser  # Commands will run as 'appuser'
+            working_dir: /opt/myapp
+            execution_mode: sequential
+            execution_mode: sequential
+            ignore_errors: true
+      
+      # Example: Complex JSON with nested fields
+      test/command/complex:
+        qos: 1
+        handlers:
+          - payload_type: json
+            payload:
+              task: backup
+            commands:
+              # Access nested JSON fields
+              - 'echo "Starting ${PAYLOAD:task} task"'
+              - 'echo "Database: ${PAYLOAD:config.database.host}:${PAYLOAD:config.database.port}"'
+              - 'pg_dump -h ${PAYLOAD:config.database.host} -p ${PAYLOAD:config.database.port} mydb > backup.sql'
+            execution_mode: sequential
+            ignore_errors: false
+            working_dir: /tmp
+            env_vars:
+              BACKUP_DIR: /backups
+              RETENTION_DAYS: "7"
+  
+  # Example: Second MQTT server
+  # remote_server:
+  #   host: mqtt.example.com
+  #   port: 8883
+  #   username: remote_user
+  #   password: ${remote_password}
+  #   client_id: mqtt_subscriber_remote
+  #   keepalive: 60
+  #   use_tls: true
+  #   
+  #   subscriptions:
+  #     prod/deploy:
+  #       qos: 2
+  #       handlers:
+  #         - payload_type: json
+  #           payload:
+  #             action: deploy
+  #           commands:
+  #             - 'deploy.sh --app ${PAYLOAD:app} --version ${PAYLOAD:version}'
+  #           execution_mode: sequential
+  #           ignore_errors: false
+
+# Configuration inheritance hierarchy:
+# 1. Global defaults (lowest priority)
+# 2. Server-level config
+# 3. Handler-level config (highest priority)
+#
+# Example:
+# - If execution_mode is set in global, server, and handler
+# - Handler value will be used
+# - If not in handler, server value will be used
+# - If not in server, global value will be used
+# - If not in global, built-in default will be used
