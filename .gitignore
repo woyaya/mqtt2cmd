@@ -17,6 +17,8 @@
 /llvm-bpf*
 /logs
 /__pycache__
+config.yaml
+passwords.yaml
 key-build*
 *.orig
 *.rej

@@ -33,6 +33,8 @@ class MQTTClientManager:
         self.max_reconnect_delay = server_config.get('max_reconnect_delay', 60)
         self.should_reconnect = True
         self.reconnect_thread = None
+        self.connection_timeout = server_config.get('connection_timeout', 10)
+        self.connection_monitor_thread = None
         
     def setup_client(self) -> mqtt.Client:
         """Setup and configure MQTT client"""
@@ -70,12 +72,15 @@ class MQTTClientManager:
             port = self.server_config['port']
             keepalive = self.server_config.get('keepalive', 60)
             
-            self.logger.info(f"[{self.server_name}] Connecting to MQTT broker {host}:{port}")
+            self.logger.info(f"[{self.server_name}] Attempting to connect to MQTT broker {host}:{port}")
             self.client.connect_async(host, port, keepalive)
+            
+            # Start a thread to monitor connection timeout
+            self._start_connection_monitor()
             
             return True
         except Exception as e:
-            self.logger.error(f"[{self.server_name}] Failed to connect to MQTT broker: {e}")
+            self.logger.error(f"[{self.server_name}] Failed to initiate connection to MQTT broker: {e}")
             if self.should_reconnect:
                 self._schedule_reconnect()
             return False
@@ -85,18 +90,36 @@ class MQTTClientManager:
         if self.reconnect_thread and self.reconnect_thread.is_alive():
             return  # Reconnection already scheduled
         
+        self.logger.warning(f"[{self.server_name}] Scheduling reconnection with {self.reconnect_delay}s delay")
         self.reconnect_thread = threading.Thread(target=self._reconnect_with_backoff)
         self.reconnect_thread.daemon = True
         self.reconnect_thread.start()
     
+    def _start_connection_monitor(self) -> None:
+        """Start a thread to monitor connection timeout"""
+        if self.connection_monitor_thread and self.connection_monitor_thread.is_alive():
+            return  # Monitor already running
+        
+        self.connection_monitor_thread = threading.Thread(target=self._monitor_connection_timeout)
+        self.connection_monitor_thread.daemon = True
+        self.connection_monitor_thread.start()
+    
+    def _monitor_connection_timeout(self) -> None:
+        """Monitor connection timeout and trigger reconnection if needed"""
+        time.sleep(self.connection_timeout)
+        
+        if not self.is_connected and self.should_reconnect:
+            self.logger.error(f"[{self.server_name}] Connection timeout after {self.connection_timeout} seconds")
+            self._schedule_reconnect()
+    
     def _reconnect_with_backoff(self) -> None:
         """Reconnect with exponential backoff delay"""
         while self.should_reconnect and not self.is_connected:
-            self.logger.info(f"[{self.server_name}] Reconnecting in {self.reconnect_delay} seconds...")
+            self.logger.info(f"[{self.server_name}] Will reconnect in {self.reconnect_delay} seconds...")
             time.sleep(self.reconnect_delay)
             
             # Increase delay for next attempt (exponential backoff) BEFORE attempting
-            self.reconnect_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
+            next_delay = min(self.reconnect_delay * 2, self.max_reconnect_delay)
             
             try:
                 host = self.server_config['host']
@@ -104,10 +127,22 @@ class MQTTClientManager:
                 keepalive = self.server_config.get('keepalive', 60)
                 
                 self.logger.info(f"[{self.server_name}] Attempting to reconnect to {host}:{port}")
-                self.client.reconnect()
+                
+                # Use connect() instead of reconnect() to handle both initial and subsequent connections
+                self.client.connect(host, port, keepalive)
+                
+                # If connect() succeeds without exception, connection is in progress
+                # The _on_connect callback will be triggered when connection completes
+                # Update delay after successful attempt initiation
+                self.reconnect_delay = next_delay
+                
+                # Wait a bit to see if connection succeeds
+                # If it fails, _on_connect will be called with error code
+                break  # Exit loop, let the connection attempt proceed
                 
             except Exception as e:
-                self.logger.error(f"[{self.server_name}] Reconnection failed: {e}")
+                self.logger.error(f"[{self.server_name}] Reconnection attempt failed: {e}")
+                self.reconnect_delay = next_delay
     
     def _on_connect(self, client, userdata, flags, rc):
         """Callback when connected to MQTT broker"""
@@ -129,6 +164,10 @@ class MQTTClientManager:
             }
             error_msg = error_messages.get(rc, f"Connection refused - code {rc}")
             self.logger.error(f"[{self.server_name}] Failed to connect: {error_msg}")
+            
+            # Schedule reconnection on connection failure
+            if self.should_reconnect:
+                self._schedule_reconnect()
     
     def _on_disconnect(self, client, userdata, rc):
         """Callback when disconnected from MQTT broker"""
