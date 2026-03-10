@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional
 class VariableResolver:
     """Resolve variables from multiple sources"""
     
-    def __init__(self, yaml_vars: Dict[str, Any] = None, payload: Any = None, payload_type: str = None):
+    def __init__(self, yaml_vars: Dict[str, Any] = None, payload: Any = None, payload_type: str = None, env_vars: Dict[str, str] = None):
         """
         Initialize variable resolver
         
@@ -21,10 +21,12 @@ class VariableResolver:
             yaml_vars: Variables from YAML configuration
             payload: Payload data (string or dict)
             payload_type: Type of payload ('string' or 'json')
+            env_vars: Additional environment variables (merged with os.environ)
         """
         self.yaml_vars = yaml_vars or {}
         self.payload = payload
         self.payload_type = payload_type
+        self.env_vars = env_vars or {}
         self.payload_vars = self._extract_payload_vars()
     
     def _extract_payload_vars(self) -> Dict[str, Any]:
@@ -109,6 +111,9 @@ class VariableResolver:
     def _get_value(self, source: str, var_name: str, default: Optional[str]) -> Optional[Any]:
         """Get value from specified source"""
         if source == 'ENV':
+            # Check additional env_vars first, then fall back to os.environ
+            if var_name in self.env_vars:
+                return self.env_vars[var_name]
             return os.environ.get(var_name, default)
         elif source == 'PAYLOAD':
             return self.payload_vars.get(var_name, default)

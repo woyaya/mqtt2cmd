@@ -173,11 +173,6 @@ class MQTTSubscriberApp:
             
             # Create variable resolver with YAML variables from config
             yaml_vars = self.config.get('global', {}).get('variables', {})
-            resolver = VariableResolver(yaml_vars, parsed_payload, payload_type)
-            
-            # Resolve variables in commands
-            commands = handler_config['commands']
-            resolved_commands = [resolver.resolve(cmd) for cmd in commands]
             
             # Get execution parameters
             execution_mode = handler_config.get('execution_mode', 'sequential')
@@ -186,11 +181,19 @@ class MQTTSubscriberApp:
             env_vars = handler_config.get('env_vars', {})
             run_as_user = handler_config.get('run_as_user')
             
-            # Resolve variables in working_dir and env_vars
+            # First pass: resolve env_vars and working_dir without additional env_vars
+            # This allows env_vars to reference YAML and PAYLOAD variables
+            resolver_pass1 = VariableResolver(yaml_vars, parsed_payload, payload_type)
             if working_dir:
-                working_dir = resolver.resolve(working_dir, escape=False)
+                working_dir = resolver_pass1.resolve(working_dir, escape=False)
             if env_vars:
-                env_vars = resolver.resolve_dict(env_vars, escape=False)
+                env_vars = resolver_pass1.resolve_dict(env_vars, escape=False)
+            
+            # Second pass: resolve commands with env_vars available
+            # This allows commands to reference ENV variables defined in env_vars
+            resolver_pass2 = VariableResolver(yaml_vars, parsed_payload, payload_type, env_vars)
+            commands = handler_config['commands']
+            resolved_commands = [resolver_pass2.resolve(cmd) for cmd in commands]
             
             # Execute commands
             success = payload_handler.execute_commands(
