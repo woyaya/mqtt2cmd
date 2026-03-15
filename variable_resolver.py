@@ -13,7 +13,14 @@ from typing import Dict, Any, Optional
 class VariableResolver:
     """Resolve variables from multiple sources"""
     
-    def __init__(self, yaml_vars: Dict[str, Any] = None, payload: Any = None, payload_type: str = None, env_vars: Dict[str, str] = None):
+    def __init__(
+        self,
+        yaml_vars: Dict[str, Any] = None,
+        payload: Any = None,
+        payload_type: str = None,
+        env_vars: Dict[str, str] = None,
+        exec_context: Dict[str, Any] = None
+    ):
         """
         Initialize variable resolver
         
@@ -22,11 +29,13 @@ class VariableResolver:
             payload: Payload data (string or dict)
             payload_type: Type of payload ('string' or 'json')
             env_vars: Additional environment variables (merged with os.environ)
+            exec_context: Execution context from previous command
         """
         self.yaml_vars = yaml_vars or {}
         self.payload = payload
         self.payload_type = payload_type
         self.env_vars = env_vars or {}
+        self.exec_context = exec_context or {}
         self.payload_vars = self._extract_payload_vars()
     
     def _extract_payload_vars(self) -> Dict[str, Any]:
@@ -72,6 +81,7 @@ class VariableResolver:
         - ${ENV:VARNAME:-default}     - Environment variable
         - ${PAYLOAD:VARNAME:-default}  - Payload variable
         - ${YAML:VARNAME:-default}     - YAML variable
+        - ${EXEC:VARNAME:-default}     - Execution context (previous command result)
         - ${VARNAME:-default}          - YAML variable (default source)
         
         Args:
@@ -101,7 +111,8 @@ class VariableResolver:
             str_value = str(value)
             
             # Escape for shell safety if needed
-            if escape and source in ['PAYLOAD', 'ENV']:
+            # EXEC variables should always be escaped for security
+            if escape and source in ['PAYLOAD', 'ENV', 'EXEC']:
                 str_value = shlex.quote(str_value)
             
             return str_value
@@ -119,6 +130,10 @@ class VariableResolver:
             return self.payload_vars.get(var_name, default)
         elif source == 'YAML':
             return self.yaml_vars.get(var_name, default)
+        elif source == 'EXEC':
+            # For EXEC, if value is None, use default
+            value = self.exec_context.get(var_name)
+            return default if value is None else value
         else:
             raise ValueError(f"Unknown variable source: {source}")
     

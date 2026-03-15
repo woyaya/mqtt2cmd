@@ -20,6 +20,29 @@ global:
   # The delay is capped at this maximum value
   max_reconnect_delay: 60
   
+  # User to run commands as (optional)
+  # IMPORTANT: Only works when running the application as root
+  # If running as root with this configured, switches to specified user at startup
+  # If running as non-root and this is set to a different user, application exits with error
+  # If not configured, commands run as the current user
+  # run_as_user: appuser
+  
+  # Maximum concurrent message handlers (default: 20)
+  # Limits how many messages can be processed simultaneously
+  # When limit is reached, new messages wait until a slot becomes available
+  max_concurrent_handlers: 20
+  
+  # Maximum EXEC output size (default: 5M)
+  # EXEC variables (STDOUT/STDERR/OUTPUT) are truncated if they exceed this size
+  # Prevents memory issues with commands that produce large outputs
+  # Supports K/M suffix: 1024K, 5M, or raw bytes: 5242880
+  max_exec_output_size: 5M
+  
+  # Command execution timeout in seconds (default: 0 = disabled)
+  # If a command runs longer than this, it will be terminated
+  # Set to 0 to disable timeout
+  command_timeout: 0
+  
   # Global defaults (optional) - can be overridden by server/handler config
   # Default username for MQTT connections
   # username: default_user
@@ -41,11 +64,6 @@ global:
   
   # Default error handling: true (continue on error) or false (stop on error)
   # ignore_errors: false
-  
-  # Default user to run commands as (requires root privileges)
-  # IMPORTANT: Only works when running the application as root
-  # If not root and this is set to a different user, the application will exit with an error
-  # run_as_user: appuser
   
   # Default working directory for command execution
   # working_dir: /path/to/directory
@@ -196,21 +214,40 @@ mqtt_servers:
             execution_mode: sequential
             ignore_errors: true
       
-      # Example: Run commands as specific user (requires root)
-      test/command/run_as_user:
+      # Example: EXEC variables in sequential mode
+      test/command/exec:
         qos: 1
         handlers:
           - payload_type: string
-            payload: "deploy_as_appuser"
+            payload: "test_exec_vars"
             commands:
-              - 'whoami'  # Will show 'appuser'
-              - 'echo "Deploying application..."'
-              - '/opt/myapp/deploy.sh'
-            run_as_user: appuser  # Commands will run as 'appuser'
-            working_dir: /opt/myapp
+              - 'echo "First command output"'
+              - 'echo "Previous output: ${EXEC:STDOUT}"'
+              - 'echo "Previous result: ${EXEC:RESULT}"'
+              - 'date +%Y-%m-%d'
+              - 'echo "Today is ${EXEC:STDOUT}"'
             execution_mode: sequential
-            execution_mode: sequential
-            ignore_errors: true
+            ignore_errors: false
+            # EXEC variables available:
+            # ${EXEC:STDOUT}  - Previous command's standard output
+            # ${EXEC:STDERR}  - Previous command's standard error
+            # ${EXEC:OUTPUT}  - Previous command's combined output (stdout + stderr)
+            # ${EXEC:RESULT}  - Previous command's exit code (0 = success)
+            # First command has empty EXEC values (RESULT=0)
+      
+      # Example: EXEC variables in parallel mode (requires defaults)
+      test/command/exec_parallel:
+        qos: 1
+        handlers:
+          - payload_type: string
+            payload: "test_exec_parallel"
+            commands:
+              - 'echo "Task 1: ${EXEC:STDOUT:-no_previous}"'
+              - 'echo "Task 2: ${EXEC:RESULT:-0}"'
+              - 'echo "Task 3: ${EXEC:OUTPUT:-empty}"'
+            execution_mode: parallel
+            # In parallel mode, EXEC variables MUST have defaults
+            # Otherwise the handler will fail with an error
       
       # Example: Complex JSON with nested fields
       test/command/complex:

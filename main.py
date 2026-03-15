@@ -6,6 +6,9 @@ MQTT subscriber with command execution
 import sys
 import time
 import argparse
+import os
+import pwd
+import threading
 from typing import Dict, Any
 from config_parser import ConfigParser
 from logger import LogManager
@@ -29,6 +32,9 @@ class MQTTSubscriberApp:
         self.logger = None
         self.mqtt_clients = []
         self.running = True
+        self.handler_semaphore = None  # Will be initialized after config load
+        self.active_handlers = 0
+        self.handler_lock = threading.Lock()
         
     def initialize(self) -> bool:
         """
@@ -61,6 +67,11 @@ class MQTTSubscriberApp:
             # Cleanup old logs
             log_manager.cleanup_old_logs()
             
+            # Initialize handler semaphore for concurrency control
+            max_concurrent = global_config.get('max_concurrent_handlers', 20)
+            self.handler_semaphore = threading.Semaphore(max_concurrent)
+            self.logger.info(f"Handler concurrency limit: {max_concurrent}")
+            
             self.logger.info("Application initialized successfully")
             return True
             
@@ -88,8 +99,9 @@ class MQTTSubscriberApp:
                 mqtt_client = MQTTClientManager(server_name, server_config, self.logger)
                 mqtt_client.setup_client()
                 
-                # Create payload handler
-                payload_handler = PayloadHandler(self.logger)
+                # Create payload handler with global config
+                global_config = self.config.get('global', {})
+                payload_handler = PayloadHandler(self.logger, global_config)
                 
                 # Register handlers for each subscription
                 self._register_handlers(mqtt_client, payload_handler, server_config)
@@ -128,10 +140,47 @@ class MQTTSubscriberApp:
                 # Create closure to capture handler configuration
                 def create_handler(hc):
                     def handler(topic, payload):
-                        self._handle_message(payload_handler, topic, payload, hc)
+                        # Create a thread to handle message asynchronously
+                        handler_thread = threading.Thread(
+                            target=self._handle_message_async,
+                            args=(payload_handler, topic, payload, hc),
+                            daemon=True,
+                            name=f"handler-{topic}-{time.time()}"
+                        )
+                        handler_thread.start()
                     return handler
                 
                 mqtt_client.register_handler(topic, create_handler(handler_config))
+    
+    def _handle_message_async(
+        self,
+        payload_handler: PayloadHandler,
+        topic: str,
+        payload: str,
+        handler_config: Dict[str, Any]
+    ) -> None:
+        """
+        Handle received MQTT message asynchronously with concurrency control
+        
+        Args:
+            payload_handler: Payload handler instance
+            topic: MQTT topic
+            payload: Message payload
+            handler_config: Handler configuration
+        """
+        # Acquire semaphore (wait if at limit)
+        self.handler_semaphore.acquire()
+        
+        with self.handler_lock:
+            self.active_handlers += 1
+            self.logger.debug(f"Active handlers: {self.active_handlers}")
+        
+        try:
+            self._handle_message(payload_handler, topic, payload, handler_config)
+        finally:
+            with self.handler_lock:
+                self.active_handlers -= 1
+            self.handler_semaphore.release()
     
     def _handle_message(
         self,
@@ -179,7 +228,7 @@ class MQTTSubscriberApp:
             ignore_errors = handler_config.get('ignore_errors', False)
             working_dir = handler_config.get('working_dir')
             env_vars = handler_config.get('env_vars', {})
-            run_as_user = handler_config.get('run_as_user')
+            commands = handler_config['commands']
             
             # First pass: resolve env_vars and working_dir without additional env_vars
             # This allows env_vars to reference YAML and PAYLOAD variables
@@ -189,20 +238,16 @@ class MQTTSubscriberApp:
             if env_vars:
                 env_vars = resolver_pass1.resolve_dict(env_vars, escape=False)
             
-            # Second pass: resolve commands with env_vars available
-            # This allows commands to reference ENV variables defined in env_vars
-            resolver_pass2 = VariableResolver(yaml_vars, parsed_payload, payload_type, env_vars)
-            commands = handler_config['commands']
-            resolved_commands = [resolver_pass2.resolve(cmd) for cmd in commands]
-            
             # Execute commands
             success = payload_handler.execute_commands(
-                resolved_commands,
+                commands,
                 execution_mode,
                 ignore_errors,
                 working_dir,
                 env_vars,
-                run_as_user
+                yaml_vars,
+                parsed_payload,
+                payload_type
             )
             
             if success:
@@ -254,6 +299,50 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Load config early to check run_as_user
+    try:
+        config_parser = ConfigParser(args.config)
+        config_parser.load_config()
+        config_parser.validate_config()
+        global_config = config_parser.get_global_config()
+        run_as_user = global_config.get('run_as_user')
+        
+        # Handle user switching if configured
+        if run_as_user:
+            current_user = pwd.getpwuid(os.getuid()).pw_name
+            current_uid = os.getuid()
+            
+            if current_user == run_as_user:
+                # Same user, no need to switch
+                print(f"Running as configured user: {run_as_user}")
+            elif current_uid == 0:
+                # Running as root, switch to target user
+                try:
+                    user_info = pwd.getpwnam(run_as_user)
+                    os.setgid(user_info.pw_gid)
+                    os.setuid(user_info.pw_uid)
+                    os.environ['HOME'] = user_info.pw_dir
+                    os.environ['USER'] = run_as_user
+                    os.environ['LOGNAME'] = run_as_user
+                    print(f"Switched from root to user: {run_as_user} (uid: {user_info.pw_uid})")
+                except KeyError:
+                    print(f"ERROR: User '{run_as_user}' does not exist")
+                    sys.exit(1)
+                except Exception as e:
+                    print(f"ERROR: Failed to switch to user '{run_as_user}': {e}")
+                    sys.exit(1)
+            else:
+                # Not root and different user - error
+                print(f"ERROR: Cannot switch to user '{run_as_user}'")
+                print(f"Current user: {current_user} (uid: {current_uid})")
+                print(f"Target user: {run_as_user}")
+                print(f"Solution: Run as root or run as user '{run_as_user}' directly")
+                sys.exit(1)
+    
+    except Exception as e:
+        print(f"ERROR: Failed to load configuration: {e}")
+        sys.exit(1)
     
     # Create and run application
     app = MQTTSubscriberApp(args.config)

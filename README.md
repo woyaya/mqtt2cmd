@@ -10,9 +10,13 @@
 - 指数退避自动重连（1/2/4/8/16/32秒）
 - String和JSON payload验证
 - 顺序和并行命令执行
-- 灵活的变量系统（ENV/PAYLOAD/YAML）
+- 灵活的变量系统（ENV/PAYLOAD/YAML/EXEC）
 - 配置继承机制
 - 工作目录和环境变量支持
+- 全局用户切换（root启动时）
+- 并发消息处理（可配置限制）
+- 命令超时控制
+- 大输出自动截断
 - 完善的错误处理和日志记录
 
 ## 系统要求
@@ -113,13 +117,14 @@ mosquitto_pub -h 127.0.0.1 -u test -P test123 \
 
 ### 变量类型
 
-应用支持三种变量源，使用统一的语法：
+应用支持四种变量源，使用统一的语法：
 
 | 变量源 | 语法 | 示例 | 说明 |
 |--------|------|------|------|
 | YAML配置 | `${YAML:key}` 或 `${key}` | `${app_name}` | 从配置文件读取 |
 | Payload | `${PAYLOAD:key}` | `${PAYLOAD:version}` | 从MQTT消息读取 |
 | 环境变量 | `${ENV:VAR}` | `${ENV:HOME}` | 从系统环境读取 |
+| 执行上下文 | `${EXEC:STDOUT}` | `${EXEC:RESULT}` | 从前一条命令读取（仅sequential模式） |
 
 ### 默认值语法
 
@@ -187,13 +192,53 @@ handlers:
       - 'echo "User: ${ENV:USER:-unknown}"'
 ```
 
-#### 4. 混合使用
+#### 4. EXEC变量（执行上下文）
+
+在sequential模式下，可以引用前一条命令的执行结果：
+
+```yaml
+handlers:
+  - payload_type: string
+    commands:
+      - 'echo "Hello World"'
+      - 'echo "Previous output: ${EXEC:STDOUT}"'
+      - 'echo "Previous result: ${EXEC:RESULT}"'
+      - 'date +%Y-%m-%d'
+      - 'echo "Today is ${EXEC:STDOUT}"'
+    execution_mode: sequential
+```
+
+EXEC变量说明：
+- `${EXEC:STDOUT}` - 前一条命令的标准输出
+- `${EXEC:STDERR}` - 前一条命令的标准错误
+- `${EXEC:OUTPUT}` - 前一条命令的组合输出（stdout + stderr）
+- `${EXEC:RESULT}` - 前一条命令的退出码（0表示成功）
+
+重要规则：
+- 仅在sequential模式下可用
+- 第一条命令的EXEC值为空（RESULT=0）
+- 输出大小限制为max_exec_output_size（默认5MB），超出会截断
+- 在parallel模式下使用EXEC变量必须提供默认值，否则报错
+
+parallel模式示例：
+```yaml
+handlers:
+  - commands:
+      - 'echo "Task 1: ${EXEC:STDOUT:-no_previous}"'  # 必须有默认值
+      - 'echo "Task 2: ${EXEC:RESULT:-0}"'
+    execution_mode: parallel
+```
+
+#### 5. 混合使用
 
 ```yaml
 handlers:
   - payload_type: json
     commands:
       - 'deploy.sh --app ${app_name} --version ${PAYLOAD:version} --user ${ENV:USER}'
+      - 'echo "Deploy result: ${EXEC:RESULT}"'
+      - 'echo "Deploy output: ${EXEC:STDOUT}"'
+    execution_mode: sequential
     env_vars:
       APP_NAME: '${app_name}'
       VERSION: '${PAYLOAD:version}'
@@ -291,11 +336,11 @@ handlers:
 
 ### 以指定用户运行命令
 
-当以root权限运行应用时,可以指定以特定用户身份执行命令:
+当以root权限运行应用时，可以在启动时切换到指定用户，所有后续命令都以该用户身份执行：
 
 ```yaml
 global:
-  # 全局默认用户(可选)
+  # 全局用户切换（仅root启动时有效）
   run_as_user: appuser
 
 mqtt_servers:
@@ -306,32 +351,33 @@ mqtt_servers:
           - commands:
               - 'whoami'  # 将显示 'appuser'
               - '/opt/app/deploy.sh'
-            run_as_user: appuser  # 覆盖全局设置
             working_dir: /opt/app
 ```
 
-**重要说明:**
-- **默认行为**: 如果未配置 `run_as_user`,命令以当前执行应用的用户身份运行
-- **Root权限要求**: 只有以root权限运行应用时才能切换到其他用户
-- **非Root限制**: 如果以非root用户运行,配置中指定其他用户会导致应用启动失败
+**重要说明：**
+- **启动时切换**: 如果以root启动且配置了run_as_user，应用会在启动时切换到指定用户
+- **非Root限制**: 如果以非root用户启动，且run_as_user配置的用户与当前用户不一致，应用会退出并报错
 - **用户验证**: 配置的用户必须在系统中存在
-- **配置继承**: 支持全局配置和handler级别配置,handler配置优先级更高
+- **安全优势**: 避免以高权限运行命令，降低安全风险；避免每次命令都sudo，提升性能
+- **全局配置**: run_as_user仅支持在global部分配置，不支持在handler级别配置
 
-**示例场景:**
-```yaml
-# 场景1: 未配置run_as_user - 使用当前用户
-handlers:
-  - commands:
-      - 'whoami'  # 显示当前执行应用的用户
+**使用场景：**
+```bash
+# 场景1: 以root启动，切换到appuser
+sudo python3 main.py  # 配置: run_as_user: appuser
+# 结果: 所有命令以appuser身份执行
 
-# 场景2: 以root运行,指定用户 - 切换到指定用户
-handlers:
-  - run_as_user: webapp
-    commands:
-      - 'whoami'  # 显示 'webapp'
+# 场景2: 以appuser启动，配置匹配
+python3 main.py  # 配置: run_as_user: appuser
+# 结果: 正常运行，所有命令以appuser身份执行
 
-# 场景3: 以非root运行,指定其他用户 - 启动失败
-# 如果当前用户是 'kingwoo',配置 run_as_user: webapp 会导致错误
+# 场景3: 以webuser启动，配置不匹配
+python3 main.py  # 配置: run_as_user: appuser
+# 结果: 应用退出并报错
+
+# 场景4: 未配置run_as_user
+python3 main.py  # 配置: 无run_as_user
+# 结果: 命令以当前用户身份执行
 ```
 ## 自动重连机制
 
@@ -358,6 +404,75 @@ mqtt_servers:
 
 After a successful connection, the reconnection interval resets to 1 second.
 
+## 并发消息处理
+
+应用支持并发处理多个MQTT消息，避免消息处理阻塞：
+
+### 工作原理
+
+- 每个接收到的消息在独立的线程中处理
+- 使用信号量限制最大并发数，防止资源耗尽
+- 当达到并发限制时，新消息会等待直到有空闲槽位
+- 线程按需创建，处理完成后自动销毁
+
+### 配置
+
+```yaml
+global:
+  # 最大并发处理器数量（默认: 20）
+  max_concurrent_handlers: 20
+```
+
+### 使用场景
+
+适合以下场景：
+- 命令执行时间较长（如部署、备份）
+- 多个消息同时到达
+- 需要避免消息处理相互阻塞
+
+示例：
+```bash
+# 同时发送5条消息
+for i in {1..5}; do
+  mosquitto_pub -t "test/concurrent" -m "message_$i" &
+done
+```
+
+所有5条消息会并发处理，互不阻塞。
+
+## 命令超时控制
+
+可以为命令执行设置超时时间，防止命令无限期运行：
+
+```yaml
+global:
+  # 命令超时时间（秒），0表示禁用（默认: 0）
+  command_timeout: 30
+```
+
+- 如果命令运行时间超过超时值，会被强制终止
+- 设置为0表示禁用超时
+- 超时的命令会记录ERROR日志
+
+## 大输出处理
+
+为防止命令产生过大输出导致内存问题，系统会自动截断：
+
+```yaml
+global:
+  # EXEC输出最大大小，支持K/M单位（默认: 5M）
+  max_exec_output_size: 5M    # 5MB
+  # 或使用其他单位
+  # max_exec_output_size: 1024K  # 1MB
+  # max_exec_output_size: 10M    # 10MB
+  # max_exec_output_size: 5242880  # 直接指定字节数
+```
+
+- 当命令输出超过此大小时，会被截断并添加[truncated]标记
+- 会记录WARNING日志
+- 仅影响EXEC变量，不影响命令实际执行
+- 支持K（KB）、M（MB）单位或直接使用字节数
+
 ## 多服务器支持
 
 支持同时连接多个MQTT服务器，每个服务器独立运行：
@@ -382,6 +497,66 @@ mqtt_servers:
 ## 配置说明
 
 详细配置请参考 `config-example.yaml`，其中包含所有配置项的详细说明和示例。
+
+### 从v3.x迁移到v4.0
+
+v4.0版本引入了重大架构改进，需要更新配置：
+
+#### 1. run_as_user配置迁移
+
+v3.x（handler级别配置）：
+```yaml
+handlers:
+  - commands: [...]
+    run_as_user: appuser  # 旧方式：每个handler配置
+```
+
+v4.0（全局配置）：
+```yaml
+global:
+  run_as_user: appuser  # 新方式：全局配置，启动时切换
+
+handlers:
+  - commands: [...]
+    # 不再支持handler级别的run_as_user
+```
+
+迁移步骤：
+1. 将所有handler中的run_as_user移除
+2. 在global部分添加统一的run_as_user配置
+3. 如果不同handler需要不同用户，需要为每个用户启动独立的应用实例
+
+#### 2. 新增全局配置项
+
+在global部分添加以下可选配置：
+
+```yaml
+global:
+  max_concurrent_handlers: 20    # 并发处理限制
+  max_exec_output_size: 5M       # EXEC输出大小限制（支持K/M单位）
+  command_timeout: 0             # 命令超时（0=禁用）
+```
+
+#### 3. EXEC变量使用
+
+v4.0新增EXEC变量，可在sequential模式下引用前一条命令的输出：
+
+```yaml
+handlers:
+  - commands:
+      - 'date +%Y-%m-%d'
+      - 'echo "Today is ${EXEC:STDOUT}"'
+    execution_mode: sequential
+```
+
+在parallel模式下使用EXEC变量必须提供默认值：
+
+```yaml
+handlers:
+  - commands:
+      - 'echo "Result: ${EXEC:RESULT:-0}"'
+    execution_mode: parallel
+```
 
 ### 最小配置
 
@@ -420,11 +595,20 @@ mqtt_servers:
 ## 版本信息
 
 ### 当前版本
-- 应用版本: 3.0.0
+- 应用版本: 4.0.0
 - Python要求: 3.7+
-- 最后更新: 2026-03-08
+- 最后更新: 2026-03-11
 
 ### 版本历史
+
+#### v4.0.0 (2026-03-11)
+- 新增EXEC变量系统（STDOUT/STDERR/OUTPUT/RESULT）
+- 全局run_as_user配置，启动时切换用户
+- 并发消息处理，支持可配置的并发限制
+- 命令超时控制
+- 大输出自动截断
+- 性能优化：消除所有sudo调用开销
+- 安全增强：避免以高权限运行命令
 
 #### v3.0.0 (2026-03-08)
 - 新增统一变量系统（ENV/PAYLOAD/YAML）
